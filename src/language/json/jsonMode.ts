@@ -93,7 +93,9 @@ export function setupMode(defaults: LanguageServiceDefaults): IDisposable {
 			);
 		}
 		if (modeConfiguration.tokens) {
-			providers.push(languages.setTokensProvider(languageId, createTokenizationSupport(true)));
+			providers.push(
+				languages.setTokensProvider(languageId, createTokenizationSupport(true, languageId))
+			);
 		}
 		if (modeConfiguration.colors) {
 			providers.push(
