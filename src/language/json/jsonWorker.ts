@@ -6,7 +6,9 @@
 import * as jsonService from 'vscode-json-languageservice';
 import type { worker } from '../../fillers/monaco-editor-core';
 import { URI } from 'vscode-uri';
-import { DiagnosticsOptions } from './monaco.contribution';
+import { DiagnosticsOptions, InstanceSettings } from './monaco.contribution';
+import { format } from './formatter';
+import { tokenize, JSONState, TOKEN_POSTMAN_VARIABLE } from './tokenization';
 
 let defaultSchemaRequestService: ((url: string) => Promise<string>) | undefined;
 if (typeof fetch !== 'undefined') {
@@ -20,10 +22,12 @@ export class JSONWorker {
 	private _languageService: jsonService.LanguageService;
 	private _languageSettings: DiagnosticsOptions;
 	private _languageId: string;
+	private _instanceSettings: InstanceSettings;
 
 	constructor(ctx: worker.IWorkerContext, createData: ICreateData) {
 		this._ctx = ctx;
 		this._languageSettings = createData.languageSettings;
+		this._instanceSettings = createData.instanceSettings;
 		this._languageId = createData.languageId;
 		this._languageService = jsonService.getLanguageService({
 			workspaceContext: {
@@ -34,13 +38,85 @@ export class JSONWorker {
 			},
 			schemaRequestService: createData.enableSchemaRequest ? defaultSchemaRequestService : undefined
 		});
-		this._languageService.configure(this._languageSettings);
+		let schemas: any = [];
+
+		// Check if the instanceSettings has schemas passed to it
+		// As they will be used while configuration of languageServer
+		for (const settingKey in this._instanceSettings.settings) {
+			if (
+				this._instanceSettings.settings[settingKey] &&
+				this._instanceSettings.settings[settingKey].schemas
+			) {
+				schemas = schemas.concat(this._instanceSettings.settings[settingKey].schemas);
+			}
+		}
+
+		if (this._languageSettings.schemas) {
+			schemas = schemas.concat(this._languageSettings.schemas);
+		}
+
+		const options = { ...this._languageSettings, schemas: schemas };
+
+		this._languageService.configure(options);
 	}
 
 	async doValidation(uri: string): Promise<jsonService.Diagnostic[]> {
-		let document = this._getTextDocument(uri);
+		let instanceSettings =
+				!!this._instanceSettings.settings && this._instanceSettings.settings[uri],
+			syntaxValidation: boolean | undefined = true,
+			schemaValidation: boolean | undefined = true;
+
+		if (instanceSettings && typeof instanceSettings.validate === 'boolean') {
+			syntaxValidation = instanceSettings.validate;
+			schemaValidation = instanceSettings.validate;
+		}
+
+		if (instanceSettings && typeof instanceSettings.validate === 'object') {
+			const validationOptions = instanceSettings.validate;
+
+			if (typeof validationOptions.allowSyntaxValidation === 'boolean') {
+				syntaxValidation = instanceSettings.validate.allowSyntaxValidation;
+			}
+
+			if (typeof validationOptions.allowSchemaValidation === 'boolean') {
+				schemaValidation = instanceSettings.validate.allowSchemaValidation;
+			}
+		}
+
+		if (!schemaValidation && !syntaxValidation) {
+			return Promise.resolve([]);
+		}
+
+		let document;
+
+		if (this._languageId === 'postman_json') {
+			document = this._getModifiedTextDocument(uri);
+		} else {
+			document = this._getTextDocument(uri);
+		}
 		if (document) {
-			let jsonDocument = this._languageService.parseJSONDocument(document);
+			let jsonDocument: any = this._languageService.parseJSONDocument(document);
+			if (
+				this._languageId === 'postman_json' &&
+				jsonDocument &&
+				jsonDocument.syntaxErrors &&
+				jsonDocument.syntaxErrors.length
+			) {
+				jsonDocument.syntaxErrors.forEach((error: any, index: any, array: any) => {
+					// removing source from syntax errors, as on hover over it displays Postman_json in
+					// the hover box
+					array[index].source = '';
+				});
+			}
+
+			if (syntaxValidation && !schemaValidation) {
+				return Promise.resolve(jsonDocument.syntaxErrors || []);
+			}
+
+			if (schemaValidation && !syntaxValidation) {
+				jsonDocument.syntaxErrors = [];
+			}
+
 			return this._languageService.doValidation(document, jsonDocument, this._languageSettings);
 		}
 		return Promise.resolve([]);
@@ -72,11 +148,17 @@ export class JSONWorker {
 		range: jsonService.Range | null,
 		options: jsonService.FormattingOptions
 	): Promise<jsonService.TextEdit[]> {
-		let document = this._getTextDocument(uri);
+		let document = this._getTextDocument(uri),
+			textEdits = [];
+
 		if (!document) {
 			return [];
 		}
-		let textEdits = this._languageService.format(document, range! /* TODO */, options);
+		if (this._languageId === 'postman_json') {
+			textEdits = format(document, range, options);
+		} else {
+			textEdits = this._languageService.format(document, range! /* TODO */, options);
+		}
 		return Promise.resolve(textEdits);
 	}
 	async resetSchema(uri: string): Promise<boolean> {
@@ -155,6 +237,52 @@ export class JSONWorker {
 		}
 		return null;
 	}
+	private _getModifiedTextDocument(uri: string): jsonService.TextDocument {
+		let models = this._ctx.getMirrorModels();
+		for (let model of models) {
+			if (model.uri.toString() === uri) {
+				let content = model.getValue();
+				if (content && content.trim() !== '') {
+					let eol = content.indexOf('\r\n') > -1 ? '\r\n' : '\n';
+					let lines = content.split(eol);
+					let state = new JSONState(null, null, false, null);
+					lines &&
+						lines.forEach((line, lineIndex, array) => {
+							let returnObj = tokenize(true, line, state, 0, 'postman_json');
+							state = <JSONState>returnObj.endState;
+							let postmanVariables = returnObj.tokens.filter(
+								(token) => token.scopes === TOKEN_POSTMAN_VARIABLE
+							);
+							if (postmanVariables.length) {
+								let offset = 0;
+								let prevVariable: any = postmanVariables[0];
+								for (let i = 0; i < postmanVariables.length; i++) {
+									let variable: any = postmanVariables[i];
+									let lineToBeReplaced = array[lineIndex];
+									if (i > 0) {
+										if (variable.startIndex < prevVariable.endIndex) {
+											continue;
+										}
+									}
+									array[lineIndex] = `${lineToBeReplaced.substring(
+										0,
+										variable.startIndex + offset
+									)}"${lineToBeReplaced.substring(
+										variable.startIndex + offset,
+										variable.endIndex + offset + 1
+									)}"${lineToBeReplaced.substring(variable.endIndex + offset + 1)}`;
+									offset += 2;
+									prevVariable = postmanVariables[i];
+								}
+							}
+						});
+					content = lines.join(eol);
+				}
+				return jsonService.TextDocument.create(uri, this._languageId, model.version, content);
+			}
+		}
+		return jsonService.TextDocument.create('', '', 0, '');
+	}
 }
 
 // URI path utilities, will (hopefully) move to vscode-uri
@@ -208,6 +336,7 @@ function joinPath(uriString: string, ...paths: string[]): string {
 export interface ICreateData {
 	languageId: string;
 	languageSettings: DiagnosticsOptions;
+	instanceSettings: InstanceSettings;
 	enableSchemaRequest: boolean;
 }
 

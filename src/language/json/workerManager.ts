@@ -57,13 +57,14 @@ export class WorkerManager {
 		if (!this._client) {
 			this._worker = editor.createWebWorker<JSONWorker>({
 				// module that exports the create() method and returns a `JSONWorker` instance
-				moduleId: 'vs/language/json/jsonWorker',
+				moduleId: 'vs/language/postman_json/jsonWorker',
 
 				label: this._defaults.languageId,
 
 				// passed in to the create() method
 				createData: {
 					languageSettings: this._defaults.diagnosticsOptions,
+					instanceSettings: this._defaults.instanceSettings,
 					languageId: this._defaults.languageId,
 					enableSchemaRequest: this._defaults.diagnosticsOptions.enableSchemaRequest
 				}

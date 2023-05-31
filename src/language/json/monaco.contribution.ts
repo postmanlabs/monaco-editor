@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as mode from './jsonMode';
-import { Emitter, IEvent, languages } from '../../fillers/monaco-editor-core';
+import { Emitter, IEvent, languages, IDisposable } from '../../fillers/monaco-editor-core';
 
 // --- JSON configuration and defaults ---------
 
@@ -115,13 +115,44 @@ export interface ModeConfiguration {
 	readonly selectionRanges?: boolean;
 }
 
+// Allows us to add map for instance level settings
+export interface InstanceSettings {
+	settings?: {
+		[key: string]: LanguageConfiguration;
+	};
+}
+export interface LanguageConfiguration {
+	validate?: boolean | ValidationOptions; // We can add more options like this to control the default behavior
+	schemas?: {
+		/**
+		 * The URI of the schema, which is also the identifier of the schema.
+		 */
+		uri: string;
+		/**
+		 * A list of file names that are associated to the schema. The '*' wildcard can be used. For example '*.schema.json', 'package.json'
+		 */
+		fileMatch?: string[];
+		/**
+		 * The schema for the given URI.
+		 */
+		schema?: any;
+	}[];
+}
+
+export interface ValidationOptions {
+	allowSyntaxValidation?: boolean;
+	allowSchemaValidation?: boolean;
+}
+
 export interface LanguageServiceDefaults {
 	readonly languageId: string;
 	readonly onDidChange: IEvent<LanguageServiceDefaults>;
 	readonly diagnosticsOptions: DiagnosticsOptions;
 	readonly modeConfiguration: ModeConfiguration;
+	readonly instanceSettings: InstanceSettings;
 	setDiagnosticsOptions(options: DiagnosticsOptions): void;
 	setModeConfiguration(modeConfiguration: ModeConfiguration): void;
+	setInstanceSettings(uri: string, setting: LanguageConfiguration): IDisposable;
 }
 
 class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
@@ -129,13 +160,16 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 	private _diagnosticsOptions!: DiagnosticsOptions;
 	private _modeConfiguration!: ModeConfiguration;
 	private _languageId: string;
+	private _instanceSettings: InstanceSettings;
 
 	constructor(
 		languageId: string,
 		diagnosticsOptions: DiagnosticsOptions,
-		modeConfiguration: ModeConfiguration
+		modeConfiguration: ModeConfiguration,
+		instanceSettings: InstanceSettings
 	) {
 		this._languageId = languageId;
+		this._instanceSettings = instanceSettings;
 		this.setDiagnosticsOptions(diagnosticsOptions);
 		this.setModeConfiguration(modeConfiguration);
 	}
@@ -156,6 +190,10 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 		return this._diagnosticsOptions;
 	}
 
+	get instanceSettings(): InstanceSettings {
+		return this._instanceSettings;
+	}
+
 	setDiagnosticsOptions(options: DiagnosticsOptions): void {
 		this._diagnosticsOptions = options || Object.create(null);
 		this._onDidChange.fire(this);
@@ -164,6 +202,22 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 	setModeConfiguration(modeConfiguration: ModeConfiguration): void {
 		this._modeConfiguration = modeConfiguration || Object.create(null);
 		this._onDidChange.fire(this);
+	}
+
+	setInstanceSettings(uri: string, setting: LanguageConfiguration): IDisposable {
+		if (this._instanceSettings.settings) {
+			this._instanceSettings.settings[uri] = setting;
+		}
+		this._onDidChange.fire(this);
+
+		return {
+			dispose: () => {
+				if (this._instanceSettings.settings) {
+					delete this._instanceSettings.settings[uri];
+				}
+				this._onDidChange.fire(this);
+			}
+		};
 	}
 }
 
@@ -191,14 +245,30 @@ const modeConfigurationDefault: Required<ModeConfiguration> = {
 	selectionRanges: true
 };
 
-export const jsonDefaults: LanguageServiceDefaults = new LanguageServiceDefaultsImpl(
-	'json',
+const instanceSettingsJsonDefault: InstanceSettings = {
+	settings: {}
+};
+
+const instanceSettingsPostmanJsonDefault: InstanceSettings = {
+	settings: {}
+};
+
+export const postmanJsonDefaults = new LanguageServiceDefaultsImpl(
+	'postman_json',
 	diagnosticDefault,
-	modeConfigurationDefault
+	modeConfigurationDefault,
+	instanceSettingsPostmanJsonDefault
+);
+
+export const jsonDefaults: LanguageServiceDefaults = new LanguageServiceDefaultsImpl(
+	'postman_json',
+	diagnosticDefault,
+	modeConfigurationDefault,
+	instanceSettingsJsonDefault
 );
 
 // export to the global based API
-(<any>languages).json = { jsonDefaults };
+(<any>languages).postman_json = { jsonDefaults };
 
 // --- Registration to monaco editor ---
 
@@ -216,10 +286,21 @@ function getMode(): Promise<typeof mode> {
 }
 
 languages.register({
+	id: 'postman_json',
+	extensions: ['.json', '.bowerrc', '.jshintrc', '.jscsrc', '.eslintrc', '.babelrc', '.har'],
+	aliases: ['JSON', 'json'],
+	mimetypes: ['application/json']
+});
+
+languages.register({
 	id: 'json',
 	extensions: ['.json', '.bowerrc', '.jshintrc', '.jscsrc', '.eslintrc', '.babelrc', '.har'],
 	aliases: ['JSON', 'json'],
 	mimetypes: ['application/json']
+});
+
+languages.onLanguage('postman_json', () => {
+	getMode().then((mode) => mode.setupMode(postmanJsonDefaults));
 });
 
 languages.onLanguage('json', () => {
